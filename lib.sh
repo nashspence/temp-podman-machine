@@ -232,10 +232,8 @@ AGENT
 PLIST
     chmod 0644 "$plist_path"
 
-    # Ensure the global agent is bootstrapped and ready
-    launchctl bootout "gui/${uid}/${agent_label}" >/dev/null 2>&1 || true
+    # Ensure the global agent is bootstrapped (idempotent; ignore "already bootstrapped" errors)
     launchctl bootstrap "gui/${uid}" "$plist_path" >/dev/null 2>&1 || true
-    launchctl kickstart -k "gui/${uid}/${agent_label}" >/dev/null 2>&1 || true
 
     # Now talk to the global agent's socket for this machine
     ready_fifo_path=$(mktemp "${TMPDIR:-/tmp}/temp-podman-machine.ready.XXXXXX")
