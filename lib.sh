@@ -3,8 +3,8 @@ temp_podman_machine() {
     set -eu
     [ "${DEBUG:-}" ] && set -x
 
-    if [ "$#" -lt 1 ]; then
-        echo "usage: use-machine pid [podman-machine-create-args...]" >&2
+    if [ "$#" -lt 2 ]; then
+        echo "usage: temp-podman-machine pid machine-name [podman-machine-init-args...]" >&2
         exit 2
     fi
 
@@ -39,38 +39,15 @@ temp_podman_machine() {
         ''|*[!0-9]*) echo "invalid pid: $target_pid" >&2; exit 2 ;;
     esac
 
-    machine_from_args() {
-        machine_name=
-        while [ "$#" -gt 0 ]; do
-            case "$1" in
-                --name=*)
-                    machine_name=${1#*=}
-                    shift
-                    continue
-                    ;;
-                -n*)
-                    machine_name=${1#-n}
-                    shift
-                    continue
-                    ;;
-                --name|-n)
-                    shift
-                    [ "$#" -gt 0 ] || { echo "missing value for --name" >&2; exit 2; }
-                    machine_name=$1
-                    shift
-                    continue
-                    ;;
-            esac
-            shift
-        done
-
-        if [ -z "$machine_name" ]; then
-            echo "machine name is required; pass --name to podman machine create" >&2
+    machine_name=$1
+    shift
+    case "$machine_name" in
+        '') echo "machine name is required" >&2; exit 2 ;;
+        -*)
+            echo "machine name must not start with '-'; it should be a positional name like 'myvm'" >&2
             exit 2
-        fi
-
-        printf '%s\n' "$machine_name"
-    }
+            ;;
+    esac
 
     ensure_machine_absent() {
         if podman machine inspect "$1" >/dev/null 2>&1; then
@@ -79,17 +56,16 @@ temp_podman_machine() {
         fi
     }
 
-    machine_name=$(machine_from_args "$@")
     ensure_machine_absent "$machine_name"
 
     uid=$(id -u)
     safe_machine_name=$(printf '%s' "$machine_name" | tr -c 'A-Za-z0-9.-' '-')
-    agent_label="use-machine.${safe_machine_name}"
+    agent_label="temp-podman-machine.${safe_machine_name}"
 
-    state_root="$HOME/Library/Application Support/use-machine/state"
+    state_root="$HOME/Library/Application Support/temp-podman-machine/state"
     state_dir="${STATE_DIR:-${state_root}/${safe_machine_name}}"
     create_args_file="$state_dir/create-args"
-    agent_script="$state_dir/use-machine-agent.sh"
+    agent_script="$state_dir/temp-podman-machine-agent.sh"
     launch_agents_dir="$HOME/Library/LaunchAgents"
     plist_path="$launch_agents_dir/${agent_label}.plist"
     socket_path="/tmp/${agent_label}.${uid}.sock"
@@ -97,6 +73,7 @@ temp_podman_machine() {
     mkdir -p "$state_dir" "$launch_agents_dir"
 
     : >"$create_args_file"
+    # Remaining args are passed directly to `podman machine init` (flags/options only).
     for arg in "$@"; do
         printf '%s\0' "$arg" >>"$create_args_file"
     done
@@ -131,10 +108,10 @@ QUIESCE_MS=${QUIESCE_MS:-1500}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-90}
 
 mkdir -p "$STATE_DIR"
-exec 3>>"$STATE_DIR/use-machine-agent.log"
+exec 3>>"$STATE_DIR/temp-podman-machine-agent.log"
 
 log() {
-  printf '%s use-machine-agent[%s]: %s\n' "$(date '+%F %T')" "$$" "$*" >&3
+  printf '%s temp-podman-machine-agent[%s]: %s\n' "$(date '+%F %T')" "$$" "$*" >&3
 }
 
 gc_holds() {
@@ -181,7 +158,7 @@ ensure_machine() {
       set -- "$@" "$arg"
     done <"$CREATE_ARGS_FILE"
   fi
-  podman machine create "$@" || { log "machine create failed for '$MACHINE'"; exit 1; }
+  podman machine init "$MACHINE" "$@" || { log "machine init failed for '$MACHINE'"; exit 1; }
 }
 
 remove_agent_files() {
@@ -291,11 +268,11 @@ PLIST
     launchctl bootstrap "gui/${uid}" "$plist_path"
     launchctl kickstart -k "gui/${uid}/${agent_label}" >/dev/null 2>&1 || true
 
-    ready_fifo_path=$(mktemp "${TMPDIR:-/tmp}/use-machine.ready.XXXXXX")
+    ready_fifo_path=$(mktemp "${TMPDIR:-/tmp}/temp-podman-machine.ready.XXXXXX")
     rm -f "$ready_fifo_path"
     mkfifo "$ready_fifo_path"
 
-    hold_fifo_path=$(mktemp "${TMPDIR:-/tmp}/use-machine.hold.XXXXXX")
+    hold_fifo_path=$(mktemp "${TMPDIR:-/tmp}/temp-podman-machine.hold.XXXXXX")
     rm -f "$hold_fifo_path"
     mkfifo "$hold_fifo_path"
 
