@@ -208,7 +208,6 @@ wait_podman_ready || true
 printf 'ready\n'
 cat >/dev/null || true
 
-cleanup_hold
 [ "$STOP_GRACE_SECS" -gt 0 ] && sleep "$STOP_GRACE_SECS"
 
 gc_holds
