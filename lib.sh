@@ -177,7 +177,7 @@ wait_podman_ready || true
 # Tell the client we're ready.
 printf 'ready\n'
 
-# Block until the socket is closed (EOF on stdin).
+# Block until the client closes the socket (EOF on stdin).
 cat >/dev/null || true
 
 log "socket closed; stopping and removing machine '$MACHINE'"
@@ -248,9 +248,10 @@ PLIST
     rm -f "$hold_fifo_path"
     mkfifo "$hold_fifo_path"
 
-    # Keep the socket open as long as target_pid is alive.
+    # Watcher ties the life of the socket input to target_pid.
     (
         exec </dev/null >/dev/null 2>&1
+        # Keep this FIFO open for writing as long as target_pid is alive.
         exec 8>"$hold_fifo_path"
         while kill -0 "$target_pid" 2>/dev/null; do
             sleep 15 || break
@@ -259,9 +260,12 @@ PLIST
     ) &
     watcher_pid=$!
 
+    # nc connects to the UNIX socket, reads agent output to ready_fifo,
+    # and takes its stdin from hold_fifo, which stays open via the watcher.
     nc -U "$socket_path" >"$ready_fifo_path" <"$hold_fifo_path" 2>/dev/null &
     nc_pid=$!
 
+    # On early error (before we know it's ready), kill nc + watcher and clean up fifos.
     trap 'kill "$nc_pid" "$watcher_pid" 2>/dev/null || true; rm -f "$ready_fifo_path" "$hold_fifo_path" 2>/dev/null || true' 0 2 15
 
     # Wait for "ready" from the agent.
@@ -281,7 +285,8 @@ PLIST
         exit 1
     fi
 
-    # From here on, lifetime of the socket is tied to target_pid via watcher + hold_fifo.
+    # From here on, we DO NOT kill nc/watcher when this subshell exits.
+    # They will keep the socket open as long as target_pid is alive.
     trap 'rm -f "$hold_fifo_path" 2>/dev/null || true' 0 2 15
 
     printf '%s\n' "$machine_name"
