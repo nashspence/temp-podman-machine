@@ -4,7 +4,7 @@ temp_podman_machine() {
     [ "${DEBUG:-}" ] && set -x
 
     if [ "$#" -lt 2 ]; then
-        echo "usage: temp-podman-machine pid machine-name [podman-machine-init-args...]" >&2
+        echo "usage: temp-podman-machine pid [podman-machine-init-args...] machine-name" >&2
         exit 2
     fi
 
@@ -39,13 +39,27 @@ temp_podman_machine() {
         ''|*[!0-9]*) echo "invalid pid: $target_pid" >&2; exit 2 ;;
     esac
 
-    machine_name=$1
-    shift
-    case "$machine_name" in
-        '') echo "machine name is required" >&2; exit 2 ;;
-        -*)
-            echo "machine name must not start with '-'; it should be a positional name like 'myvm'" >&2
+    # Remaining arguments are: [podman machine init options...] machine-name
+    if [ "$#" -lt 1 ]; then
+        echo "machine name (last argument) is required" >&2
+        exit 2
+    fi
+
+    # Get last argument as machine name (Podman style: init [options] [name])
+    last_arg=$1
+    for a; do last_arg=$a; done
+
+    case "$last_arg" in
+        '' )
+            echo "machine name (last argument) is required" >&2
             exit 2
+            ;;
+        -* )
+            echo "machine name (last argument) must not start with '-'; it should be a positional name like 'myvm'" >&2
+            exit 2
+            ;;
+        * )
+            machine_name=$last_arg
             ;;
     esac
 
@@ -73,8 +87,9 @@ temp_podman_machine() {
     mkdir -p "$state_dir" "$launch_agents_dir"
 
     : >"$create_args_file"
-    # Remaining args are passed directly to `podman machine init` (flags/options only).
-    for arg in "$@"; do
+    # Store all init options EXCEPT the machine name into CREATE_ARGS_FILE
+    for arg; do
+        [ "$arg" = "$machine_name" ] && continue
         printf '%s\0' "$arg" >>"$create_args_file"
     done
 
