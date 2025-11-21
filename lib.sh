@@ -74,29 +74,25 @@ temp_podman_machine() {
 
     uid=$(id -u)
     safe_machine_name=$(printf '%s' "$machine_name" | tr -c 'A-Za-z0-9.-' '-')
+    agent_label="temp-podman-machine.${safe_machine_name}"
 
-    # Global state/agent for all machines
     state_root="$HOME/Library/Application Support/temp-podman-machine/state"
-    agent_script="$state_root/temp-podman-machine-agent.sh"
-    launch_agents_dir="$HOME/Library/LaunchAgents"
-    agent_label="temp-podman-machine.agent"
-    plist_path="$launch_agents_dir/${agent_label}.plist"
-    socket_path="$state_root/agent.${uid}.sock"
-
-    # Per-machine state lives under state_root
     state_dir="${STATE_DIR:-${state_root}/${safe_machine_name}}"
     create_args_file="$state_dir/create-args"
+    agent_script="$state_dir/temp-podman-machine-agent.sh"
+    launch_agents_dir="$HOME/Library/LaunchAgents"
+    plist_path="$launch_agents_dir/${agent_label}.plist"
+    socket_path="/tmp/${agent_label}.${uid}.sock"
 
-    mkdir -p "$state_root" "$state_dir" "$launch_agents_dir"
+    mkdir -p "$state_dir" "$launch_agents_dir"
 
-    # Store all init options EXCEPT the machine name into CREATE_ARGS_FILE
     : >"$create_args_file"
+    # Store all init options EXCEPT the machine name into CREATE_ARGS_FILE
     for arg; do
         [ "$arg" = "$machine_name" ] && continue
         printf '%s\0' "$arg" >>"$create_args_file"
     done
 
-    # Install / refresh the single global agent & plist
     cat >"$agent_script" << 'AGENT'
 #!/bin/sh
 
@@ -108,12 +104,23 @@ export PATH
 
 command -v podman >/dev/null 2>&1 || { printf '%s\n' 'podman not found' >&2; exit 127; }
 
-STATE_ROOT=${STATE_ROOT:-"$HOME/Library/Application Support/temp-podman-machine/state"}
+MACHINE=${MACHINE:-}
+[ -n "$MACHINE" ] || { printf '%s\n' 'machine name is required' >&2; exit 2; }
+
+STATE_DIR=${STATE_DIR:-}
+[ -n "$STATE_DIR" ] || { printf '%s\n' 'STATE_DIR is required' >&2; exit 2; }
+
+CREATE_ARGS_FILE=${CREATE_ARGS_FILE:-${STATE_DIR}/create-args}
+AGENT_PLIST=${AGENT_PLIST:-}
+AGENT_LABEL=${AGENT_LABEL:-}
+UID_NUM=${UID_NUM:-$(id -u)}
+SOCKET_PATH=${SOCKET_PATH:-}
+AGENT_SCRIPT=${AGENT_SCRIPT:-}
 
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-90}
 
-mkdir -p "$STATE_ROOT"
-exec 3>>"$STATE_ROOT/temp-podman-machine-agent.log"
+mkdir -p "$STATE_DIR"
+exec 3>>"$STATE_DIR/temp-podman-machine-agent.log"
 
 log() {
   printf '%s temp-podman-machine-agent[%s]: %s\n' "$(date '+%F %T')" "$$" "$*" >&3
@@ -149,47 +156,37 @@ ensure_machine() {
   podman machine init "$MACHINE" "$@" || { log "machine init failed for '$MACHINE'"; exit 1; }
 }
 
-cleanup_machine() {
-  log "stopping and removing machine '$MACHINE'"
-  podman machine stop "$MACHINE" >/dev/null 2>&1 || true
-  podman machine rm -f "$MACHINE" >/dev/null 2>&1 || true
+remove_agent_files() {
+  [ -n "$AGENT_PLIST" ] && rm -f "$AGENT_PLIST" 2>/dev/null || true
+  [ -n "$SOCKET_PATH" ] && rm -f "$SOCKET_PATH" 2>/dev/null || true
+  [ -n "$AGENT_SCRIPT" ] && rm -f "$AGENT_SCRIPT" 2>/dev/null || true
   rm -rf "$STATE_DIR" 2>/dev/null || true
 }
 
-handle_connection() {
-  # First line from client is the machine name
-  if ! IFS= read -r MACHINE; then
-    log "no machine name received; exiting"
-    exit 1
-  fi
-  case "$MACHINE" in
-    ''|-) log "invalid machine name '$MACHINE'"; exit 2 ;;
-  esac
-
-  safe_machine_name=$(printf '%s' "$MACHINE" | tr -c 'A-Za-z0-9.-' '-')
-  STATE_DIR="${STATE_ROOT}/${safe_machine_name}"
-  CREATE_ARGS_FILE="${STATE_DIR}/create-args"
-
-  mkdir -p "$STATE_DIR"
-
-  ensure_machine
-
-  log "connection for '$MACHINE'; ensuring machine is running"
-  podman machine start "$MACHINE" >/dev/null 2>&1 || true
-  wait_podman_ready || true
-
-  # Tell the client we're ready.
-  printf 'ready\n'
-
-  # Block until the socket is closed (EOF on stdin).
-  cat >/dev/null || true
-
-  cleanup_machine
-  log "cleanup complete for '$MACHINE'"
-  exit 0
+remove_launch_agent() {
+  [ -n "$AGENT_LABEL" ] || return 0
+  launchctl bootout "gui/${UID_NUM}/${AGENT_LABEL}" >/dev/null 2>&1 || true
 }
 
-handle_connection
+ensure_machine
+
+log "connection accepted; ensuring machine '$MACHINE' is running"
+podman machine start "$MACHINE" >/dev/null 2>&1 || true
+wait_podman_ready || true
+
+# Tell the client we're ready.
+printf 'ready\n'
+
+# Block until the socket is closed (EOF on stdin).
+cat >/dev/null || true
+
+log "socket closed; stopping and removing machine '$MACHINE'"
+podman machine stop "$MACHINE" >/dev/null 2>&1 || true
+podman machine rm -f "$MACHINE" >/dev/null 2>&1 || true
+
+remove_agent_files
+remove_launch_agent
+exit 0
 AGENT
 
     chmod 0755 "$agent_script"
@@ -223,7 +220,14 @@ AGENT
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>STATE_ROOT</key><string>${state_root}</string>
+    <key>MACHINE</key><string>${machine_name}</string>
+    <key>STATE_DIR</key><string>${state_dir}</string>
+    <key>CREATE_ARGS_FILE</key><string>${create_args_file}</string>
+    <key>AGENT_PLIST</key><string>${plist_path}</string>
+    <key>AGENT_LABEL</key><string>${agent_label}</string>
+    <key>UID_NUM</key><string>${uid}</string>
+    <key>SOCKET_PATH</key><string>${socket_path}</string>
+    <key>AGENT_SCRIPT</key><string>${agent_script}</string>
   </dict>
 
   <key>KeepAlive</key><false/>
@@ -232,10 +236,10 @@ AGENT
 PLIST
     chmod 0644 "$plist_path"
 
-    # Ensure the global agent is bootstrapped (idempotent; ignore "already bootstrapped" errors)
-    launchctl bootstrap "gui/${uid}" "$plist_path" >/dev/null 2>&1 || true
+    launchctl bootout "gui/${uid}/${agent_label}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${uid}" "$plist_path"
+    launchctl kickstart -k "gui/${uid}/${agent_label}" >/dev/null 2>&1 || true
 
-    # Now talk to the global agent's socket for this machine
     ready_fifo_path=$(mktemp "${TMPDIR:-/tmp}/temp-podman-machine.ready.XXXXXX")
     rm -f "$ready_fifo_path"
     mkfifo "$ready_fifo_path"
@@ -255,13 +259,7 @@ PLIST
     ) &
     watcher_pid=$!
 
-    # 1) Send machine_name as first line to agent
-    # 2) Pipe hold_fifo to keep the connection open
-    # 3) Read "ready" from agent into ready_fifo
-    (
-      printf '%s\n' "$machine_name"
-      cat "$hold_fifo_path"
-    ) | nc -U "$socket_path" >"$ready_fifo_path" 2>/dev/null &
+    nc -U "$socket_path" >"$ready_fifo_path" <"$hold_fifo_path" 2>/dev/null &
     nc_pid=$!
 
     trap 'kill "$nc_pid" "$watcher_pid" 2>/dev/null || true; rm -f "$ready_fifo_path" "$hold_fifo_path" 2>/dev/null || true' 0 2 15
